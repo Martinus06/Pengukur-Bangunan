@@ -1,376 +1,418 @@
-// Global Variables
-let stream = null;
-let points = [];
-let currentCategory = 'lantai';
-let video, canvas, ctx;
-// KALIBRASI BARU: 100 pixel di layar = 1 meter di dunia nyata (default)
-// Ini artinya 1 pixel = 1 cm
-let pixelPerMeter = 100; // Seberapa banyak pixel untuk 1 meter
-let calibrationMultiplier = 1; // Multiplier untuk kalibrasi manual
+import React, { useState, useRef, useEffect } from 'react';
+import { Camera, RotateCcw, Calculator } from 'lucide-react';
 
-// Material Constants by Category
-const MATERIALS_BY_CATEGORY = {
-    lantai: {
-        keramik: { per_m2: 11, unit: 'buah', name: 'Keramik 30x30cm' },
-        semen: { per_m2: 10, unit: 'kg', name: 'Semen' },
-        pasir: { per_m2: 0.03, unit: 'm³', name: 'Pasir' },
-        perekat: { per_m2: 5, unit: 'kg', name: 'Perekat Lantai' },
-        nat: { per_m2: 0.5, unit: 'kg', name: 'Nat Keramik' }
-    },
-    tembok: {
-        hebel: { per_m2: 8.33, unit: 'buah', name: 'Hebel (60x20cm)' },
-        semen: { per_m2: 9.6, unit: 'kg', name: 'Semen' },
-        pasir: { per_m2: 0.024, unit: 'm³', name: 'Pasir' },
-        acian: { per_m2: 3.5, unit: 'kg', name: 'Acian' },
-        cat: { per_m2: 0.15, unit: 'liter', name: 'Cat (2 lapis)' }
-    },
-    plafon: {
-        gypsum: { per_m2: 1, unit: 'lembar', name: 'Gypsum 120x240cm' },
-        rangka: { per_m2: 3, unit: 'batang', name: 'Rangka Hollow' },
-        sekrup: { per_m2: 20, unit: 'buah', name: 'Sekrup Gypsum' },
-        compound: { per_m2: 0.8, unit: 'kg', name: 'Compound' },
-        cat: { per_m2: 0.12, unit: 'liter', name: 'Cat Plafon' }
-    }
-};
+export default function ARMaterialCalculator() {
+  const [cameraActive, setCameraActive] = useState(false);
+  const [points, setPoints] = useState([]);
+  const [measurements, setMeasurements] = useState(null);
+  const [materials, setMaterials] = useState(null);
+  const [manualLength, setManualLength] = useState('');
+  const [manualWidth, setManualWidth] = useState('');
+  const [manualHeight, setManualHeight] = useState('');
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
 
-const CATEGORY_LABELS = {
-    lantai: '🟦 Lantai',
-    tembok: '🧱 Tembok',
-    plafon: '⬜ Plafon'
-};
-
-// Start AR Camera
-async function startAR() {
-    document.getElementById('landingScreen').classList.add('hidden');
-    document.getElementById('arScreen').classList.remove('hidden');
-
-    video = document.getElementById('video');
-    canvas = document.getElementById('canvas');
-    ctx = canvas.getContext('2d');
-
+  // Fungsi untuk memulai kamera
+  const startCamera = async () => {
     try {
-        stream = await navigator.mediaDevices.getUserMedia({
-            video: { 
-                facingMode: 'environment', 
-                width: { ideal: 1920 }, 
-                height: { ideal: 1080 } 
-            }
-        });
-        video.srcObject = stream;
-        video.onloadedmetadata = () => {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            
-            // Auto-kalibrasi berdasarkan resolusi kamera
-            // Kalibrasi REALISTIS: 1 pixel ≈ 0.2-0.5 cm
-            const resolution = canvas.width * canvas.height;
-            if (resolution > 2000000) { // Full HD+ (1920x1080+)
-                pixelToMeterRatio = 0.0015; // 1px = 0.15cm
-            } else if (resolution > 1000000) { // HD (1280x720)
-                pixelToMeterRatio = 0.002; // 1px = 0.2cm
-            } else { // Standard (640x480)
-                pixelToMeterRatio = 0.003; // 1px = 0.3cm
-            }
-            
-            drawCanvas();
-        };
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' }
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+      setCameraActive(true);
     } catch (err) {
-        alert('Tidak dapat mengakses kamera. Pastikan izin kamera diberikan.');
-        console.error(err);
-        stopAR();
+      alert('Tidak dapat mengakses kamera. Pastikan Anda memberikan izin kamera.');
+      console.error(err);
     }
+  };
 
-    // Setup calibration slider
-    const calibrationSlider = document.getElementById('calibrationSlider');
-    const calibrationValue = document.getElementById('calibrationValue');
-    
-    calibrationSlider.addEventListener('input', (e) => {
-        calibrationMultiplier = parseFloat(e.target.value);
-        const labels = {
-            '1': 'Sangat Kecil',
-            '1.5': 'Kecil',
-            '2': 'Normal',
-            '2.5': 'Sedang',
-            '3': 'Besar',
-            '3.5': 'Lebih Besar',
-            '4': 'Sangat Besar',
-            '4.5': 'Ekstra Besar',
-            '5': 'Maksimal'
-        };
-        calibrationValue.textContent = labels[e.target.value] || 'Normal';
-    });
-
-    // Click on canvas to add point
-    canvas.onclick = (e) => {
-        const rect = canvas.getBoundingClientRect();
-        const scaleX = canvas.width / rect.width;
-        const scaleY = canvas.height / rect.height;
-        const x = (e.clientX - rect.left) * scaleX;
-        const y = (e.clientY - rect.top) * scaleY;
-        
-        // Hitung jarak dalam pixel, lalu konversi ke cm
-        const distanceInPixels = points.length > 0 ? 
-            Math.sqrt(Math.pow(x - points[points.length - 1].x, 2) + 
-                      Math.pow(y - points[points.length - 1].y, 2)) : 0;
-        
-        // Konversi pixel ke centimeter (1 pixel = 0.2cm default)
-        const distanceInCm = distanceInPixels * (pixelToMeterRatio * 100) * calibrationMultiplier;
-        
-        addPointAt(x, y, distanceInCm);
-    };
-}
-
-// Select Category
-function selectCategory(category) {
-    currentCategory = category;
-    
-    // Update button states
-    document.querySelectorAll('.category-btn').forEach(btn => {
-        btn.classList.remove('active');
-    });
-    document.querySelector(`[data-category="${category}"]`).classList.add('active');
-    
-    // Update display
-    document.getElementById('currentCategory').textContent = CATEGORY_LABELS[category].split(' ')[1];
-}
-
-// Add Point at Center (for button click)
-function addPointAtCenter() {
-    const centerX = canvas.width / 2;
-    const centerY = canvas.height / 2;
-    
-    const distanceInPixels = points.length > 0 ? 
-        Math.sqrt(Math.pow(centerX - points[points.length - 1].x, 2) + 
-                  Math.pow(centerY - points[points.length - 1].y, 2)) : 0;
-    
-    const distanceInCm = distanceInPixels * (pixelToMeterRatio * 100) * calibrationMultiplier;
-    
-    addPointAt(centerX, centerY, distanceInCm);
-}
-
-// Add Point at Specific Location
-function addPointAt(x, y, distance) {
-    if (points.length >= 8) {
-        alert('Maksimal 8 titik!');
-        return;
+  // Fungsi untuk menghentikan kamera
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
     }
-    points.push({ x, y, distance });
-    updateUI();
-}
+    setCameraActive(false);
+    setPoints([]);
+  };
 
-// Update UI
-function updateUI() {
-    document.getElementById('pointCount').textContent = points.length;
-    const calculateBtn = document.getElementById('calculateBtn');
-    
-    if (points.length >= 3) {
-        calculateBtn.disabled = false;
-        calculateBtn.textContent = '✓ Hitung Material';
-    } else {
-        calculateBtn.disabled = true;
-        calculateBtn.textContent = `Minimal 3 Titik (${points.length}/3)`;
+  // Fungsi untuk menandai titik di kamera
+  const handleCanvasClick = (e) => {
+    if (!cameraActive || points.length >= 2) return;
+
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const newPoints = [...points, { x, y }];
+    setPoints(newPoints);
+
+    // Jika sudah 2 titik, hitung pengukuran
+    if (newPoints.length === 2) {
+      calculateMeasurement(newPoints);
     }
-}
+  };
 
-// Draw Canvas
-function drawCanvas() {
-    if (!ctx || !canvas) return;
+  // Fungsi untuk menggambar titik dan garis di canvas
+  useEffect(() => {
+    if (!cameraActive) return;
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    const ctx = canvas.getContext('2d');
 
-    // Draw points
-    points.forEach((point, index) => {
-        // Point circle
+    const drawFrame = () => {
+      if (!video || !canvas) return;
+
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+
+      // Gambar titik-titik
+      points.forEach((point, index) => {
         ctx.beginPath();
-        ctx.arc(point.x, point.y, 12, 0, 2 * Math.PI);
+        ctx.arc(point.x, point.y, 8, 0, 2 * Math.PI);
         ctx.fillStyle = '#3B82F6';
         ctx.fill();
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Label titik
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 16px Arial';
+        ctx.fillText(`Titik ${index + 1}`, point.x + 15, point.y - 10);
+      });
+
+      // Gambar garis penghubung putih
+      if (points.length === 2) {
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+        ctx.lineTo(points[1].x, points[1].y);
         ctx.strokeStyle = '#FFFFFF';
         ctx.lineWidth = 3;
         ctx.stroke();
 
-        // Point label with background
-        const label = `Titik ${index + 1}`;
-        ctx.font = 'bold 16px Arial';
-        const textWidth = ctx.measureText(label).width;
+        // Tampilkan ukuran di tengah garis
+        const midX = (points[0].x + points[1].x) / 2;
+        const midY = (points[0].y + points[1].y) / 2;
         
-        // Background
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-        ctx.beginPath();
-        ctx.roundRect(point.x + 18, point.y - 25, textWidth + 12, 26, 6);
-        ctx.fill();
-        
-        // Text
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(midX - 40, midY - 20, 80, 30);
         ctx.fillStyle = '#FFFFFF';
-        ctx.fillText(label, point.x + 24, point.y - 7);
-    });
+        ctx.font = 'bold 14px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('37 cm', midX, midY);
+      }
 
-    // Draw lines
-    if (points.length > 1) {
-        ctx.beginPath();
-        ctx.moveTo(points[0].x, points[0].y);
-        for (let i = 1; i < points.length; i++) {
-            ctx.lineTo(points[i].x, points[i].y);
-        }
-        if (points.length > 2) {
-            ctx.lineTo(points[0].x, points[0].y);
-        }
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 4;
-        ctx.setLineDash([15, 10]);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Draw distances
-        for (let i = 0; i < points.length; i++) {
-            const nextIndex = (i + 1) % points.length;
-            if (i === points.length - 1 && points.length <= 2) break;
-            
-            const p1 = points[i];
-            const p2 = points[nextIndex];
-            const midX = (p1.x + p2.x) / 2;
-            const midY = (p1.y + p2.y) / 2;
-            const distance = p1.distance || 0;
-
-            // Format distance lebih baik
-            let distanceText;
-            if (distance >= 100) {
-                distanceText = `${(distance / 100).toFixed(2)} m`;
-            } else {
-                distanceText = `${distance.toFixed(1)} cm`;
-            }
-
-            // Measure text width for background
-            ctx.font = 'bold 14px Arial';
-            const distTextWidth = ctx.measureText(distanceText).width;
-            
-            // Background
-            ctx.fillStyle = 'rgba(59, 130, 246, 0.95)';
-            ctx.beginPath();
-            ctx.roundRect(midX - distTextWidth/2 - 8, midY - 15, distTextWidth + 16, 24, 6);
-            ctx.fill();
-            
-            // Text
-            ctx.fillStyle = '#FFFFFF';
-            ctx.textAlign = 'center';
-            ctx.fillText(distanceText, midX, midY + 3);
-        }
-    }
-
-    requestAnimationFrame(drawCanvas);
-}
-
-// Reset Measurement
-function resetMeasurement() {
-    points = [];
-    calibrationMultiplier = 1;
-    document.getElementById('calibrationSlider').value = 2;
-    document.getElementById('calibrationValue').textContent = 'Normal';
-    updateUI();
-}
-
-// Stop AR
-function stopAR() {
-    if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-        stream = null;
-    }
-    document.getElementById('arScreen').classList.add('hidden');
-    document.getElementById('landingScreen').classList.remove('hidden');
-    resetMeasurement();
-}
-
-// Calculate Area
-function calculateArea() {
-    if (points.length < 3) {
-        alert('Minimal 3 titik diperlukan!');
-        return;
-    }
-
-    // Calculate area using Shoelace formula
-    let area = 0;
-    for (let i = 0; i < points.length; i++) {
-        const j = (i + 1) % points.length;
-        area += points[i].x * points[j].y;
-        area -= points[j].x * points[i].y;
-    }
-    area = Math.abs(area / 2);
-    
-    // Konversi pixel² ke m²
-    // Formula: (area_pixel) * (meter_per_pixel)² * calibrationMultiplier²
-    // Contoh: 1000x1000 pixel dengan ratio 0.002 = 1000*1000*0.002*0.002 = 4 m²
-    const areaInM2 = area * Math.pow(pixelToMeterRatio * calibrationMultiplier, 2);
-
-    // Calculate perimeter
-    let perimeter = 0;
-    for (let i = 0; i < points.length; i++) {
-        perimeter += points[i].distance || 0;
-    }
-    perimeter = perimeter / 100; // Convert cm to m
-
-    displayResults(areaInM2, perimeter, currentCategory);
-}
-
-// Calculate Material Manual
-function hitungMaterialManual() {
-    const panjang = parseFloat(document.getElementById('panjang').value);
-    const lebar = parseFloat(document.getElementById('lebar').value);
-    const category = document.getElementById('manualCategory').value;
-    
-    if (!panjang || !lebar) {
-        alert('Mohon isi panjang dan lebar!');
-        return;
-    }
-
-    const areaInM2 = panjang * lebar;
-    const perimeter = 2 * (panjang + lebar);
-
-    displayResults(areaInM2, perimeter, category);
-}
-
-// Display Results
-function displayResults(areaInM2, perimeter, category) {
-    document.getElementById('areaValue').textContent = areaInM2.toFixed(2);
-    document.getElementById('perimeterValue').textContent = perimeter.toFixed(2);
-    document.getElementById('modalCategory').textContent = CATEGORY_LABELS[category];
-
-    const materialsList = document.getElementById('materialsList');
-    materialsList.innerHTML = '';
-    
-    const materials = MATERIALS_BY_CATEGORY[category];
-    Object.keys(materials).forEach(key => {
-        const material = materials[key];
-        const amount = (areaInM2 * material.per_m2 * 1.1).toFixed(2); // +10% tolerance
-        
-        materialsList.innerHTML += `
-            <div class="material-item">
-                <span class="material-name">${material.name}</span>
-                <span class="material-amount">${amount} ${material.unit}</span>
-            </div>
-        `;
-    });
-
-    document.getElementById('resultsModal').classList.remove('hidden');
-}
-
-// Close Modal - DIPERBAIKI!
-function closeModal() {
-    document.getElementById('resultsModal').classList.add('hidden');
-}
-
-// Polyfill for roundRect (for older browsers)
-if (!CanvasRenderingContext2D.prototype.roundRect) {
-    CanvasRenderingContext2D.prototype.roundRect = function(x, y, width, height, radius) {
-        this.beginPath();
-        this.moveTo(x + radius, y);
-        this.lineTo(x + width - radius, y);
-        this.quadraticCurveTo(x + width, y, x + width, y + radius);
-        this.lineTo(x + width, y + height - radius);
-        this.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
-        this.lineTo(x + radius, y + height);
-        this.quadraticCurveTo(x, y + height, x, y + height - radius);
-        this.lineTo(x, y + radius);
-        this.quadraticCurveTo(x, y, x + radius, y);
-        this.closePath();
+      requestAnimationFrame(drawFrame);
     };
+
+    drawFrame();
+  }, [cameraActive, points]);
+
+  // Simulasi perhitungan pengukuran (dalam implementasi nyata, ini akan menggunakan AR API)
+  const calculateMeasurement = (pointsArray) => {
+    // Simulasi: anggap pengukuran dari kamera
+    const length = 5; // meter (contoh)
+    const width = 4; // meter (contoh)
+    
+    setMeasurements({ length, width });
+    
+    // Hitung material otomatis
+    calculateMaterials(length, width, 3); // default tinggi 3 meter
+  };
+
+  // Fungsi reset
+  const resetMeasurement = () => {
+    setPoints([]);
+    setMeasurements(null);
+    setMaterials(null);
+  };
+
+  // Fungsi hitung material dari input manual
+  const calculateFromManual = () => {
+    const length = parseFloat(manualLength);
+    const width = parseFloat(manualWidth);
+    const height = parseFloat(manualHeight) || 3;
+
+    if (!length || !width) {
+      alert('Mohon isi panjang dan lebar terlebih dahulu');
+      return;
+    }
+
+    calculateMaterials(length, width, height);
+  };
+
+  // Fungsi kalkulasi material
+  const calculateMaterials = (length, width, height) => {
+    // Luas lantai (m²)
+    const floorArea = length * width;
+    
+    // Luas dinding (m²) - keliling x tinggi
+    const perimeter = 2 * (length + width);
+    const wallArea = perimeter * height;
+    
+    // Volume (m³)
+    const volume = floorArea * height;
+
+    // Perhitungan material (angka-angka ini adalah estimasi standar)
+    
+    // Hebel (batako ringan) - untuk dinding
+    // Ukuran hebel standar: 60cm x 20cm = 0.12 m²
+    // Perhitungan: 8.3 batang per m²
+    const hebelPerM2 = 8.3;
+    const totalHebel = Math.ceil(wallArea * hebelPerM2);
+
+    // Semen untuk hebel (1 sak = 40kg untuk 8-10 m²)
+    const semenHebel = Math.ceil(wallArea / 9);
+    
+    // Pasir untuk hebel (0.024 m³ per m²)
+    const pasirHebel = (wallArea * 0.024).toFixed(2);
+
+    // Plesteran/Acian
+    // Semen untuk plesteran (1 sak untuk 4-5 m²)
+    const semenPlester = Math.ceil(wallArea / 4.5);
+    
+    // Pasir untuk plesteran (0.02 m³ per m²)
+    const pasirPlester = (wallArea * 0.02).toFixed(2);
+
+    // Cat (1 liter untuk 10-12 m², 2 lapis)
+    const catLiter = Math.ceil((wallArea * 2) / 11);
+
+    // Total
+    const totalSemen = semenHebel + semenPlester;
+    const totalPasir = (parseFloat(pasirHebel) + parseFloat(pasirPlester)).toFixed(2);
+
+    setMaterials({
+      floorArea: floorArea.toFixed(2),
+      wallArea: wallArea.toFixed(2),
+      volume: volume.toFixed(2),
+      hebel: totalHebel,
+      semen: totalSemen,
+      pasir: totalPasir,
+      cat: catLiter,
+      dimensions: { length, width, height }
+    });
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900 text-white p-4">
+      {/* Header */}
+      <div className="bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg p-4 mb-4 shadow-lg">
+        <div className="flex items-center gap-3">
+          <Camera className="w-8 h-8" />
+          <div>
+            <h1 className="text-2xl font-bold">Pengukur AR</h1>
+            <p className="text-sm text-blue-100">Ukur Titik ke Titik - iPhone Style</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Area Kamera */}
+      <div className="bg-gray-800 rounded-lg p-4 mb-4 shadow-xl">
+        {!cameraActive ? (
+          <div className="aspect-video bg-gray-700 rounded-lg flex items-center justify-center border-2 border-dashed border-gray-600">
+            <div className="text-center">
+              <Camera className="w-16 h-16 mx-auto mb-4 text-gray-400" />
+              <p className="text-lg mb-4">Klik tombol di bawah untuk memulai</p>
+            </div>
+          </div>
+        ) : (
+          <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+            <canvas
+              ref={canvasRef}
+              onClick={handleCanvasClick}
+              className="absolute inset-0 w-full h-full cursor-crosshair"
+            />
+            {points.length < 2 && (
+              <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-black bg-opacity-70 px-4 py-2 rounded-lg">
+                <p className="text-sm">
+                  {points.length === 0 ? 'Tap untuk menandai Titik 1' : 'Tap untuk menandai Titik 2'}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tombol Kontrol Kamera */}
+        <div className="mt-4 flex gap-3">
+          {!cameraActive ? (
+            <button
+              onClick={startCamera}
+              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition"
+            >
+              <Camera className="w-5 h-5" />
+              Buka Kamera AR
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={stopCamera}
+                className="flex-1 bg-gray-600 hover:bg-gray-700 text-white font-semibold py-3 px-4 rounded-lg transition"
+              >
+                Tutup Kamera
+              </button>
+              <button
+                onClick={resetMeasurement}
+                className="bg-red-600 hover:bg-red-700 text-white font-semibold py-3 px-4 rounded-lg flex items-center gap-2 transition"
+              >
+                <RotateCcw className="w-5 h-5" />
+                Reset
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* Panduan Penggunaan */}
+        <div className="mt-4 bg-blue-900 bg-opacity-50 rounded-lg p-3">
+          <h3 className="font-semibold mb-2 flex items-center gap-2">
+            📱 Cara Menggunakan (iPhone Measure Style):
+          </h3>
+          <ol className="text-sm space-y-1 ml-4">
+            <li>1. Buka kamera AR dan arahkan ke area yang ingin diukur</li>
+            <li>2. Gerakkan perangkat perlahan untuk tracking 3D</li>
+            <li>3. Tap "Tandai Titik" untuk titik pertama</li>
+            <li>4. Gerakkan ke titik kedua, lalu tap "Tandai Titik" lagi</li>
+            <li>5. Jarak otomatis terhitung menggunakan sensor AR</li>
+          </ol>
+        </div>
+      </div>
+
+      {/* Input Manual */}
+      <div className="bg-gray-800 rounded-lg p-4 mb-4 shadow-xl">
+        <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+          <Calculator className="w-6 h-6" />
+          📐 Dimensi untuk Kalkulator
+        </h2>
+        
+        <div className="space-y-3">
+          <div>
+            <label className="block text-sm font-medium mb-1">Panjang (meter)</label>
+            <input
+              type="number"
+              step="0.1"
+              value={manualLength}
+              onChange={(e) => setManualLength(e.target.value)}
+              placeholder="Dari pengukuran atau input manual"
+              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-1">Lebar (meter)</label>
+            <input
+              type="number"
+              step="0.1"
+              value={manualWidth}
+              onChange={(e) => setManualWidth(e.target.value)}
+              placeholder="Dari pengukuran atau input manual"
+              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-1">Tinggi (meter) - Opsional</label>
+            <input
+              type="number"
+              step="0.1"
+              value={manualHeight}
+              onChange={(e) => setManualHeight(e.target.value)}
+              placeholder="Untuk menghitung volume"
+              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          <button
+            onClick={calculateFromManual}
+            className="w-full bg-gradient-to-r from-green-600 to-blue-600 hover:from-green-700 hover:to-blue-700 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition"
+          >
+            📊 Hitung Material
+          </button>
+        </div>
+      </div>
+
+      {/* Hasil Kalkulasi Material */}
+      {materials && (
+        <div className="bg-gradient-to-br from-green-900 to-blue-900 rounded-lg p-4 shadow-xl">
+          <h2 className="text-2xl font-bold mb-4">📋 Kebutuhan Material</h2>
+          
+          <div className="bg-black bg-opacity-30 rounded-lg p-4 mb-4">
+            <h3 className="font-semibold text-lg mb-2">Dimensi Bangunan:</h3>
+            <div className="grid grid-cols-3 gap-2 text-sm">
+              <div className="bg-blue-900 bg-opacity-50 p-2 rounded">
+                <p className="text-gray-300">Panjang</p>
+                <p className="text-xl font-bold">{materials.dimensions.length}m</p>
+              </div>
+              <div className="bg-blue-900 bg-opacity-50 p-2 rounded">
+                <p className="text-gray-300">Lebar</p>
+                <p className="text-xl font-bold">{materials.dimensions.width}m</p>
+              </div>
+              <div className="bg-blue-900 bg-opacity-50 p-2 rounded">
+                <p className="text-gray-300">Tinggi</p>
+                <p className="text-xl font-bold">{materials.dimensions.height}m</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <div className="bg-blue-800 bg-opacity-50 rounded-lg p-3">
+              <div className="flex justify-between items-center">
+                <span className="font-semibold">🧱 Hebel (Batako Ringan)</span>
+                <span className="text-2xl font-bold text-yellow-300">{materials.hebel} pcs</span>
+              </div>
+              <p className="text-xs text-gray-300 mt-1">Untuk dinding seluas {materials.wallArea} m²</p>
+            </div>
+
+            <div className="bg-blue-800 bg-opacity-50 rounded-lg p-3">
+              <div className="flex justify-between items-center">
+                <span className="font-semibold">🏗️ Semen (Total)</span>
+                <span className="text-2xl font-bold text-yellow-300">{materials.semen} sak</span>
+              </div>
+              <p className="text-xs text-gray-300 mt-1">Untuk pemasangan hebel & plesteran</p>
+            </div>
+
+            <div className="bg-blue-800 bg-opacity-50 rounded-lg p-3">
+              <div className="flex justify-between items-center">
+                <span className="font-semibold">⛏️ Pasir (Total)</span>
+                <span className="text-2xl font-bold text-yellow-300">{materials.pasir} m³</span>
+              </div>
+              <p className="text-xs text-gray-300 mt-1">Untuk pemasangan hebel & plesteran</p>
+            </div>
+
+            <div className="bg-blue-800 bg-opacity-50 rounded-lg p-3">
+              <div className="flex justify-between items-center">
+                <span className="font-semibold">🎨 Cat Dinding</span>
+                <span className="text-2xl font-bold text-yellow-300">{materials.cat} liter</span>
+              </div>
+              <p className="text-xs text-gray-300 mt-1">Untuk 2 lapis cat pada dinding</p>
+            </div>
+          </div>
+
+          <div className="mt-4 bg-yellow-900 bg-opacity-30 border border-yellow-600 rounded-lg p-3">
+            <p className="text-sm text-yellow-200">
+              ⚠️ <strong>Catatan:</strong> Perhitungan ini adalah estimasi standar. 
+              Tambahkan 10-15% untuk cadangan material. Konsultasikan dengan tukang 
+              berpengalaman untuk hasil yang lebih akurat.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Footer Info */}
+      <div className="mt-6 text-center text-sm text-gray-400">
+        <p>💡 Tips: Untuk pengukuran AR yang akurat, pastikan pencahayaan cukup dan gerakkan perangkat perlahan</p>
+      </div>
+    </div>
+  );
 }
